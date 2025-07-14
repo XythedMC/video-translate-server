@@ -11,18 +11,34 @@ const logWithTimestamp = (identifier, message, ...args) => {
     console.log(`[${timestamp}] [${identifier}] ${message}`, ...args);
 };
 
-const speechClient = new speech.SpeechClient();
-const translationClient = new TranslationServiceClient();
+let credentialsConfig = {}; // Object to hold the credentials configuration for clients
 
-// --- CRITICAL: Ensure this projectId matches your Google Cloud Project ID ---
 const projectId = 'dazzling-byway-356015'; // Your Google Cloud Project ID
-const location = 'global'; // Or your specific region for Translation API
+const location = 'global'; // For Translation API
+
+const base64Credentials = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON_BASE64;
+
+if (base64Credentials) {
+    try {
+        const credentialsJson = Buffer.from(base64Credentials, 'base64').toString('utf8');
+        const parsedCredentials = JSON.parse(credentialsJson); // Parse the credentials JSON
+
+        credentialsConfig = { credentials: parsedCredentials };
+        logWithTimestamp('GCP Setup', 'Google Cloud clients will be initialized using Base64 encoded service account.');
+    } catch (error) {
+        console.error('Failed to parse or use Base64 encoded GOOGLE_APPLICATION_CREDENTIALS_JSON_BASE64:', error);
+    }
+} else {
+    logWithTimestamp('GCP Setup', 'GOOGLE_APPLICATION_CREDENTIALS_JSON_BASE64 not found. Google Cloud clients will attempt default environment credentials.');
+}
+
+const speechClient = new speech.SpeechClient(credentialsConfig);
+const translationClient = new TranslationServiceClient(credentialsConfig);
 
 const app = express();
 const server = http.createServer(app);
 
 app.use(cors({ origin: 'https://video-translator.netlify.app' })); // <--- PASTE YOUR NETLIFY URL HERE
-// And for Socket.IO:
 const io = socketIo(server, {
     cors: {
         origin: 'https://video-translator.netlify.app', // <--- PASTE YOUR NETLIFY URL HERE
