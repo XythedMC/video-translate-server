@@ -21,14 +21,14 @@ const location = 'global'; // Or your specific region for Translation API
 const app = express();
 const server = http.createServer(app);
 
-app.use(cors({ origin: 'http://localhost:3000' }));
-
+app.use(cors({ origin: 'https://video-translator.netlify.app' })); // <--- PASTE YOUR NETLIFY URL HERE
+// And for Socket.IO:
 const io = socketIo(server, {
     cors: {
-        origin: 'http://localhost:3000',
-        methods: ['GET', 'POST']
+        origin: 'https://video-translator.netlify.app', // <--- PASTE YOUR NETLIFY URL HERE
+        methods: ["GET", "POST"]
     },
-    maxHttpBufferSize: 1e8 // Increased buffer size
+    maxHttpBufferSize: 1e8
 });
 
 const PORT = process.env.PORT || 5000;
