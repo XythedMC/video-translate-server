@@ -38,12 +38,27 @@ const translationClient = new TranslationServiceClient(credentialsConfig);
 const app = express();
 const server = http.createServer(app);
 
-app.use(cors({ origin: 'https://video-translator.netlify.app' })); // <--- PASTE YOUR NETLIFY URL HERE
+const allowedOrigins = [
+    'https://video-translator.netlify.app',
+    'http://localhost:3000', // For local React dev server
+    'http://localhost:5173', // For local Vite dev server
+];
+
+const corsOptions = {
+    origin: function (origin, callback) {
+        // Allow requests with no origin (like mobile apps or curl requests)
+        if (!origin) return callback(null, true);
+        if (allowedOrigins.indexOf(origin) === -1) {
+            const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
+            return callback(new Error(msg), false);
+        }
+        return callback(null, true);
+    }
+};
+
+app.use(cors(corsOptions));
 const io = socketIo(server, {
-    cors: {
-        origin: 'https://video-translator.netlify.app', // <--- PASTE YOUR NETLIFY URL HERE
-        methods: ["GET", "POST"]
-    },
+    cors: corsOptions,
     maxHttpBufferSize: 1e8
 });
 
@@ -59,19 +74,19 @@ io.on('connection', (socket) => {
     logWithTimestamp(socket.id, 'A user connected.');
 
     socket.on('registerUsername', (username) => {
+        logWithTimestamp(username, `Attempting to register with socket ID: ${socket.id}`); // <-- ADD THIS
         if (usernameToSocketId.has(username)) {
+            logWithTimestamp(username, `Registration FAILED: Username already taken.`); // <-- ADD THIS
             socket.emit('registrationFailed', `Username "${username}" is already taken.`);
             return;
         }
         usernameToSocketId.set(username, socket.id);
         socketIdToUsername.set(socket.id, username);
-        // ...existing code...
         userLanguages.set(socket.id, { 
             sourceLanguage: 'en-US', 
             targetLanguage: 'es', 
             sttSourceLanguages: ['en-US', 'he-IL'] 
         });
-        // ...existing code...
         socket.emit('registrationSuccess', username);
         logWithTimestamp(username, `Registered successfully.`);
     });
@@ -79,11 +94,19 @@ io.on('connection', (socket) => {
     socket.on('callUser', (data) => {
         const { userToCall, signalData } = data;
         const callerUsername = socketIdToUsername.get(socket.id);
-        if (!callerUsername) return;
+        
+        logWithTimestamp(callerUsername, `Initiating call to '${userToCall}'.`);
+        if (!callerUsername) {
+            logWithTimestamp(socket.id, `Call failed: Caller username not found for this socket.`);
+            return;
+        }
+
         const calleeSocketId = usernameToSocketId.get(userToCall);
         if (calleeSocketId) {
+            logWithTimestamp(callerUsername, `Found '${userToCall}' online with socket ID ${calleeSocketId}. Sending offer.`);
             io.to(calleeSocketId).emit('callUser', { from: callerUsername, signalData });
         } else {
+            logWithTimestamp(callerUsername, `Call FAILED: User '${userToCall}' is not online or not registered.`);
             socket.emit('callFailed', { message: `User ${userToCall} is not online.` });
         }
     });
