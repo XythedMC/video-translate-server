@@ -46,7 +46,6 @@ const allowedOrigins = [
 
 const corsOptions = {
     origin: function (origin, callback) {
-        // Allow requests with no origin (like mobile apps or curl requests)
         if (!origin) return callback(null, true);
         if (allowedOrigins.indexOf(origin) === -1) {
             const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
@@ -64,19 +63,25 @@ const io = socketIo(server, {
 
 const PORT = process.env.PORT || 5000;
 
-const activeSpeechStreams = new Map();
-const userLanguages = new Map();
-const usernameToSocketId = new Map();
-const socketIdToUsername = new Map();
-const activeCalls = new Map();
+// --- NEW: STT Stream Timeout for long calls (4 minutes = 240,000 ms) ---
+// Google Cloud STT streaming has a 5-minute limit per stream.
+// We will destroy the stream proactively before it hits the limit,
+// so a new one is created on the next audio chunk.
+const STT_STREAM_TIMEOUT_MS = 4 * 60 * 1000; // 4 minutes in milliseconds
+
+const activeSpeechStreams = new Map(); // Stores active STT streaming sessions
+const userLanguages = new Map(); // Stores language settings for each user
+const usernameToSocketId = new Map(); // Maps usernames to socket IDs
+const socketIdToUsername = new Map(); // Maps socket IDs back to usernames
+const activeCalls = new Map(); // Tracks active calls between users
 
 io.on('connection', (socket) => {
     logWithTimestamp(socket.id, 'A user connected.');
 
     socket.on('registerUsername', (username) => {
-        logWithTimestamp(username, `Attempting to register with socket ID: ${socket.id}`); // <-- ADD THIS
+        logWithTimestamp(username, `Attempting to register with socket ID: ${socket.id}`);
         if (usernameToSocketId.has(username)) {
-            logWithTimestamp(username, `Registration FAILED: Username already taken.`); // <-- ADD THIS
+            logWithTimestamp(username, `Registration FAILED: Username already taken.`);
             socket.emit('registrationFailed', `Username "${username}" is already taken.`);
             return;
         }
@@ -145,19 +150,25 @@ io.on('connection', (socket) => {
         const currentLangs = userLanguages.get(socketId);
         if (!currentLangs || !username) return;
 
-        // CRITICAL FIX: Do not process empty chunks
         if (!chunk || chunk.byteLength === 0) {
             return;
         }
 
+        const remoteUsername = activeCalls.get(socketId);
+        const remoteSocketId = usernameToSocketId.get(remoteUsername);
+        const remoteLangs = userLanguages.get(remoteSocketId);
+
+        if (!remoteSocketId || !remoteLangs) {
+            return;
+        }
+
         if (!activeSpeechStreams.has(socketId)) {
-            logWithTimestamp(username, `Creating new STT stream with sample rate: ${sampleRate}`);
+            logWithTimestamp(username, `Creating new STT stream with sample rate: ${sampleRate}.`);
             const request = {
                 config: {
                     encoding: 'LINEAR16',
                     sampleRateHertz: sampleRate,
                     languageCode: currentLangs.sourceLanguage,
-                    // Use alternativeLanguageCodes for multi-language recognition
                     alternativeLanguageCodes: currentLangs.sttSourceLanguages.filter(lang => lang !== currentLangs.sourceLanguage),
                     model: 'default',
                     interimResults: true,
@@ -165,14 +176,12 @@ io.on('connection', (socket) => {
             };
             const recognizeStream = speechClient.streamingRecognize(request)
                 .on('error', (err) => {
-                    // --- ENHANCED ERROR LOGGING ---
-                    logWithTimestamp(username, `STT Error:`, err); // Log the full error object
-                    if (err.code === 16) { // UNAUTHENTICATED
+                    logWithTimestamp(username, `STT Error:`, err);
+                    if (err.code === 16) {
                          logWithTimestamp(username, `STT Authentication Error: Please check GOOGLE_APPLICATION_CREDENTIALS and service account permissions.`);
-                    } else if (err.code === 7) { // PERMISSION_DENIED
+                    } else if (err.code === 7) {
                          logWithTimestamp(username, `STT Permission Denied: Ensure Speech-to-Text API is enabled and service account has 'Speech-to-Text User' role.`);
                     }
-                    // --- END ENHANCED ERROR LOGGING ---
                     activeSpeechStreams.delete(socketId);
                 })
                 .on('data', async (streamData) => {
@@ -183,16 +192,16 @@ io.on('connection', (socket) => {
                     let translatedText = transcript;
                     if (
                         isFinal &&
-                        transcript && // <-- Only translate if transcript is not empty
-                        currentLangs.targetLanguage &&
-                        currentLangs.sourceLanguage.split('-')[0] !== currentLangs.targetLanguage.split('-')[0]
+                        transcript &&
+                        remoteLangs.targetLanguage &&
+                        currentLangs.sourceLanguage.split('-')[0] !== remoteLangs.targetLanguage.split('-')[0]
                     ) {
                         try {
                             const [response] = await translationClient.translateText({
                                 parent: `projects/${projectId}/locations/${location}`,
                                 contents: [transcript],
                                 sourceLanguageCode: currentLangs.sourceLanguage.split('-')[0],
-                                targetLanguageCode: currentLangs.targetLanguage.split('-')[0],
+                                targetLanguageCode: remoteLangs.targetLanguage.split('-')[0],
                             });
                             translatedText = response.translations[0].translatedText;
                         } catch (translateErr) {
@@ -205,6 +214,21 @@ io.on('connection', (socket) => {
                     io.emit('liveSubtitle', { speakerId: username, text: translatedText, isFinal });
                 });
             activeSpeechStreams.set(socketId, recognizeStream);
+
+            // --- NEW: Set a timeout to destroy the stream before its 5-minute limit ---
+            // This ensures a new stream is created on the next audio chunk for long calls.
+            const streamDestroyTimeout = setTimeout(() => {
+                logWithTimestamp(username, `STT stream for ${username} timed out after ${STT_STREAM_TIMEOUT_MS / 1000} seconds. Renewing stream.`);
+                if (recognizeStream && !recognizeStream.destroyed) {
+                    recognizeStream.destroy();
+                }
+                activeSpeechStreams.delete(socketId); // Remove from map so a new one is created
+            }, STT_STREAM_TIMEOUT_MS);
+
+            // Store the timeout ID so we can clear it if the user disconnects earlier
+            // This is a simple way; for more complex scenarios, you might manage these timeouts more robustly.
+            socket.on('disconnect', () => clearTimeout(streamDestroyTimeout));
+            socket.on('disconnectCall', () => clearTimeout(streamDestroyTimeout));
         }
         
         const stream = activeSpeechStreams.get(socketId);
@@ -234,7 +258,7 @@ io.on('connection', (socket) => {
             activeSpeechStreams.delete(socketId);
         }
         usernameToSocketId.delete(username);
-        socketIdToUsername.delete(socketId);
+        socketIdToUsername.delete(socket.id);
         userLanguages.delete(socketId);
         activeCalls.delete(socketId);
         logWithTimestamp(username, 'Cleanup complete.');
