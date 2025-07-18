@@ -90,7 +90,7 @@ io.on('connection', (socket) => {
         userLanguages.set(socket.id, { 
             sourceLanguage: 'en-US', 
             targetLanguage: 'es', 
-            sttSourceLanguages: ['en-US', 'he-IL'] 
+            sttSourceLanguages: ['en-US', 'he-IL', 'ru-RU'] 
         });
         socket.emit('registrationSuccess', username);
         logWithTimestamp(username, `Registered successfully.`);
@@ -112,7 +112,7 @@ io.on('connection', (socket) => {
             io.to(calleeSocketId).emit('callUser', { from: callerUsername, signalData });
         } else {
             logWithTimestamp(callerUsername, `Call FAILED: User '${userToCall}' is not online or not registered.`);
-            socket.emit('callFailed', { message: `User ${userToCall} is not online.` });
+            socket.emit('callFailed', { message: `User ${userToCall} is not online.`, user: userToCall });
         }
     });
 
@@ -170,7 +170,8 @@ io.on('connection', (socket) => {
                     sampleRateHertz: sampleRate,
                     languageCode: currentLangs.sourceLanguage,
                     alternativeLanguageCodes: currentLangs.sttSourceLanguages.filter(lang => lang !== currentLangs.sourceLanguage),
-                    model: 'default',
+                    model: 'telephony',
+                    enableAutomaticPunctuation: true,
                     interimResults: true,
                 },
             };
